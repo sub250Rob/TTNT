@@ -17,6 +17,17 @@ static inline uint8_t admux_for(uint8_t mux)
   return (uint8_t)((1 << REFS0) | (mux & 0x0F));
 }
 
+// _delay_us() wants a compile-time constant, and its upper bound depends on
+// F_CPU, so walk to the target in fixed 10 us chunks rather than handing it a
+// large runtime value. Loop overhead makes this slightly longer than asked
+// for, which for a settling delay is free.
+static void settle_delay(void)
+{
+  for (uint16_t i = 0; i < (ADC_MUX_SETTLE_US / 10u); i++) {
+    _delay_us(10);
+  }
+}
+
 // Start a conversion and spin until the hardware clears ADSC.
 static inline void convert_blocking(void)
 {
@@ -58,11 +69,17 @@ uint16_t adc_read_counts(uint8_t mux)
     ADMUX = admux_for(mux);
     current_mux = mux;
 
-    // Give the new source time to settle, then throw away one conversion so
-    // the sample-and-hold cap is charged from the new channel and not the old.
-    _delay_us(ADC_MUX_SETTLE_US);
-    convert_blocking();
-    (void)ADC;
+    // Let the new source settle, then throw away several conversions so the
+    // sample-and-hold is charged from the new channel and not the old. The
+    // residual from the previous channel decays over successive conversions
+    // rather than vanishing after one, so a single discard leaves the early
+    // samples of an average biased toward wherever the mux used to point.
+    settle_delay();
+
+    for (uint8_t d = 0; d < ADC_MUX_DISCARD_SAMPLES; d++) {
+      convert_blocking();
+      (void)ADC;
+    }
   }
 
   convert_blocking();
