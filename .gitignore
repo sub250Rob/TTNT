@@ -1,3 +1,6 @@
 *.DS_Store
 .pio/
 CLAUDE.md
+.vscode/
+.pio/
+.claude/
