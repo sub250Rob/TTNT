@@ -178,12 +178,15 @@ void loop(void)
         votes_low   = 0;
         state = STATE_VERIFY;
       } else {
-        // Healthy. Raise the driver to its running duty, which also covers the
-        // very first reading after boot, where pwm_init() left the pin at 0%.
-        if (!have_first_reading || pwm_get_duty_pct() != PWM_DUTY_NORMAL_PCT) {
-          pwm_set_duty_pct(PWM_DUTY_NORMAL_PCT);
+        // Healthy. Aim for the running duty; pwm_ramp_step() below walks the
+        // output there over PWM_RAMP_MS rather than stepping in one go. Covers
+        // the first reading after boot, where pwm_init() left the pin at 0%.
+        if (!have_first_reading) {
+          printf("  -> healthy, ramping to %u%% over %u ms\n",
+                 PWM_DUTY_NORMAL_PCT, (uint16_t)PWM_RAMP_MS);
+          have_first_reading = 1;
         }
-        have_first_reading = 1;
+        pwm_set_target_pct(PWM_DUTY_NORMAL_PCT);
       }
       break;
 
@@ -196,7 +199,9 @@ void loop(void)
 
       if (votes_taken >= VOTE_SAMPLES) {
         if (votes_low >= VOTE_TRIP_COUNT) {
-          pwm_set_duty_pct(PWM_DUTY_FLOOR_PCT);
+          // force, not target: the drop to the floor is immediate and pins the
+          // target so no later ramp step can raise it again.
+          pwm_force_pct(PWM_DUTY_FLOOR_PCT);
 
           // The flowchart's last decision: flag set AND duty actually at the
           // floor? Reading OCR1A back checks the silicon rather than our own
@@ -208,7 +213,7 @@ void loop(void)
             // Should be unreachable. If the hardware did not take the floor
             // value, say so loudly rather than pretending we are latched.
             printf("  ** PWM DID NOT REACH FLOOR - latch not armed **\n");
-            pwm_set_duty_pct(PWM_DUTY_NORMAL_PCT);
+            pwm_set_target_pct(PWM_DUTY_NORMAL_PCT);
             low_flag = 0;
             state = STATE_NORMAL;
           }
@@ -227,6 +232,22 @@ void loop(void)
 
     default:
       break;
+  }
+
+  // Advance the ramp, but only in NORMAL. Freezing it during VERIFY means the
+  // 10-sample vote judges one steady operating point instead of a load that is
+  // still climbing underneath it. In LATCHED the target is pinned at the floor,
+  // so this would do nothing anyway -- not calling it is belt and braces.
+  uint8_t duty_before = pwm_get_duty_pct();
+
+  if (state == STATE_NORMAL) {
+    pwm_ramp_step();
+  }
+
+  uint8_t duty_now = pwm_get_duty_pct();
+
+  if (duty_now != duty_before && duty_now == pwm_get_target_pct()) {
+    printf("  -> ramp complete at %u%%\n", duty_now);
   }
 
   // Print on every state change, and otherwise only occasionally -- one line

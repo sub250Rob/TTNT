@@ -140,6 +140,26 @@
 // not 0%, so the driver is left in a defined dimmed state rather than dark.
 #define PWM_DUTY_FLOOR_PCT      1u
 
+// Soft start. Duty rises by this much per sample instead of stepping straight
+// to full, so the boost converter's inrush is spread over many small
+// transients rather than one large one. 5% every 20 ms reaches 100% in 400 ms.
+//
+// Ramping is deliberately ONE-WAY: increases are rate limited, decreases are
+// immediate. Dropping to the floor is a safety action and must never be
+// gradual. See pwm_ramp_step().
+//
+// This also makes the turn-on decision consistent with the latch decision.
+// Without it, full duty is authorised from an unloaded reading and then judged
+// against a loaded one -- the threshold means something different either side
+// of a single register write.
+#define PWM_RAMP_STEP_PCT       5u
+
+#define PWM_RAMP_MS             ((PWM_DUTY_NORMAL_PCT / PWM_RAMP_STEP_PCT) * SAMPLE_INTERVAL_MS)
+
+#if (PWM_RAMP_STEP_PCT == 0)
+#error "PWM_RAMP_STEP_PCT of 0 would never reach the running duty"
+#endif
+
 // ---- Detection ------------------------------------------------------------
 //
 // CONFIRM BEFORE FLIGHT: 21.0 V is 3.50 V/cell on a 6S pack -- conservative,

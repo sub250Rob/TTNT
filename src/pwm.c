@@ -12,6 +12,22 @@
 #define PWM_OCR_FOR_PCT(pct)  ((uint16_t)(((uint32_t)(PWM_TOP + 1UL) * (pct)) / 100UL))
 
 static uint8_t duty_pct;
+static uint8_t target_pct;
+
+// The only place OCR1A is written. Everything else goes through the ramp.
+static void apply_duty(uint8_t pct)
+{
+  duty_pct = pct;
+
+  // OCR1A is 16-bit, and an 8-bit core writes it as two bytes through a shared
+  // temporary register. If an interrupt landed between the two halves and did
+  // its own 16-bit timer access, that temporary would be clobbered and the
+  // duty would come out wrong. Nothing in this firmware does that today, but
+  // the cost of being sure is a handful of cycles.
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    OCR1A = PWM_OCR_FOR_PCT(pct);
+  }
+}
 
 void pwm_init(void)
 {
@@ -32,36 +48,59 @@ void pwm_init(void)
 
   ICR1 = PWM_TOP;
 
-  // Start at zero duty. The state machine raises it only after a reading
-  // confirms the pack is healthy.
-  duty_pct = 0;
-  OCR1A = 0;
+  // Start at zero duty, and target zero. The state machine raises the target
+  // only after a reading confirms the pack is healthy.
+  target_pct = 0;
+  apply_duty(0);
 
   // CS12:CS10 = 001 -> no prescaling. 16 MHz / 16000 = 1000 Hz.
   TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS10);
 }
 
-void pwm_set_duty_pct(uint8_t pct)
+void pwm_set_target_pct(uint8_t pct)
 {
-  if (pct > 100u) {
-    pct = 100u;
+  target_pct = (pct > 100u) ? 100u : pct;
+}
+
+void pwm_force_pct(uint8_t pct)
+{
+  pct = (pct > 100u) ? 100u : pct;
+
+  // Pin the target too, so a later pwm_ramp_step() cannot walk the output back
+  // up. The latch depends on this.
+  target_pct = pct;
+  apply_duty(pct);
+}
+
+void pwm_ramp_step(void)
+{
+  if (duty_pct == target_pct) {
+    return;
   }
 
-  duty_pct = pct;
+  if (target_pct > duty_pct) {
+    // Rate limited on the way up. Each small step's inrush settles well inside
+    // one sample interval, so the next reading measures a stable operating
+    // point rather than a transient.
+    uint8_t room = (uint8_t)(target_pct - duty_pct);
+    uint8_t step = (room < PWM_RAMP_STEP_PCT) ? room : (uint8_t)PWM_RAMP_STEP_PCT;
 
-  // OCR1A is 16-bit, and an 8-bit core writes it as two bytes through a shared
-  // temporary register. If an interrupt landed between the two halves and did
-  // its own 16-bit timer access, that temporary would be clobbered and the
-  // duty would come out wrong. Nothing in this firmware does that today, but
-  // the cost of being sure is a handful of cycles.
-  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-    OCR1A = PWM_OCR_FOR_PCT(pct);
+    apply_duty((uint8_t)(duty_pct + step));
+  } else {
+    // Immediate on the way down. Shedding load is never the dangerous
+    // direction, and a gradual latch would defeat the point of latching.
+    apply_duty(target_pct);
   }
 }
 
 uint8_t pwm_get_duty_pct(void)
 {
   return duty_pct;
+}
+
+uint8_t pwm_get_target_pct(void)
+{
+  return target_pct;
 }
 
 uint8_t pwm_is_at_floor(void)
