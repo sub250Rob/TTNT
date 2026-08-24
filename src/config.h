@@ -17,13 +17,17 @@
 // Both values below are NOMINAL. They are wrong until measured on this board.
 
 // VBAT / V_A0, scaled by 1000. Nominal 47k/10k would be 5.700; the real parts
-// measure 5.589, i.e. a bottom leg near 10.26k (+2.6%, inside 5% tolerance).
+// measure 5.594, i.e. a bottom leg near 10.23k (+2.3%, inside 5% tolerance).
 //
-// CALIBRATED 2026-08-22, least squares through the origin over three
-// DMM-verified points (18.99 / 20.99 / 24.96 V). Residuals all under 0.07%,
-// well inside the 28.4 mV per-count resolution:
+// RECALIBRATED for the permanent payload divider, least squares through the
+// origin over three DMM-verified points (17.99 / 20.99 / 24.00 V). Residuals
+// all under 0.04%, well inside the 28.4 mV per-count resolution:
 //
-//     DMM 18990 -> 18985   DMM 20990 -> 21003   DMM 24960 -> 24949
+//     DMM 17990 -> 17984   DMM 20990 -> 20994   DMM 24000 -> 24003
+//
+// The breadboard build measured 5589 -- only 0.09% away, under one count. That
+// closeness is a property of these particular resistors, not a general result:
+// recalibrate whenever the divider is rebuilt.
 //
 // Calibrated end-to-end against the firmware's own a0_mv rather than a DMM
 // reading at A0, because a0_mv = V_A0 * (BANDGAP_stored / BANDGAP_true) with
@@ -33,7 +37,7 @@
 //
 // It agrees with the divider measured directly by DMM (21.000 V in -> 3757 mV
 // at A0) to 0.01%, so the two methods independently confirm each other.
-#define DIVIDER_RATIO_X1000   5589u
+#define DIVIDER_RATIO_X1000   5594u
 
 // The internal bandgap in millivolts. Datasheet spread is 1.0-1.2 V, so this
 // is a per-board constant and it is not exactly 1100.
@@ -74,9 +78,31 @@
 // early samples of a 16-sample average were still pulling the mean off.
 #define ADC_MUX_DISCARD_SAMPLES  4u
 
-// ---- Reporting ------------------------------------------------------------
+// ---- Timing ---------------------------------------------------------------
+//
+// Replaces the stage 1 delay() in loop(). Two stages of division get us from a
+// 16 MHz crystal to a 500 ms cadence, because Timer2 cannot span that alone:
+// even at its slowest prescaler and a full 8-bit count it tops out at 16.4 ms.
+//
+//   16 MHz --/128--> 125 kHz --OCR2A=249--> 2 ms ISR --count 250--> 500 ms
 
-// Stage 2 deletes this: the delay() in loop() is replaced by a timer ISR.
-#define PRINT_INTERVAL_MS     500u
+// How often the Timer2 ISR fires. timebase.c derives OCR2A from this.
+//
+// 2 ms is the CEILING for the /128 prescaler: OCR2A = 125 * TIMEBASE_TICK_MS - 1,
+// and OCR2A only holds 255, so 3 ms would need 374 and will not fit. A slower
+// tick means moving to the /256 or /1024 prescaler.
+#define TIMEBASE_TICK_MS        2u
+
+// How often a full VBAT sample is taken and a line printed. The ISR runs 250x
+// more often than this and counts down to it, doing nothing on the other 249.
+#define SAMPLE_INTERVAL_MS      500u
+
+// Ticks the ISR counts before raising the sample flag. 500 / 2 = 250.
+#define SAMPLE_INTERVAL_TICKS   (SAMPLE_INTERVAL_MS / TIMEBASE_TICK_MS)
+
+// Integer division would silently truncate and leave the real period short.
+#if (SAMPLE_INTERVAL_MS % TIMEBASE_TICK_MS) != 0
+#error "SAMPLE_INTERVAL_MS must be a whole number of TIMEBASE_TICK_MS ticks"
+#endif
 
 #endif
