@@ -93,9 +93,13 @@
 // tick means moving to the /256 or /1024 prescaler.
 #define TIMEBASE_TICK_MS        2u
 
-// How often a full VBAT sample is taken and a line printed. The ISR runs 250x
-// more often than this and counts down to it, doing nothing on the other 249.
-#define SAMPLE_INTERVAL_MS      500u
+// How often a full VBAT sample is taken. The ISR runs many times more often
+// than this and counts down to it, doing nothing on the intervening ticks.
+//
+// Stage 3 dropped this from 500 ms to 20 ms so the 10-sample vote resolves in
+// 200 ms instead of 5 seconds. Budget at 20 ms: a VBAT-only read is 1.66 ms
+// (8%), and the one sample in 25 that also reads the bandgap is 8.16 ms (41%).
+#define SAMPLE_INTERVAL_MS      20u
 
 // Ticks the ISR counts before raising the sample flag. 500 / 2 = 250.
 #define SAMPLE_INTERVAL_TICKS   (SAMPLE_INTERVAL_MS / TIMEBASE_TICK_MS)
@@ -103,6 +107,59 @@
 // Integer division would silently truncate and leave the real period short.
 #if (SAMPLE_INTERVAL_MS % TIMEBASE_TICK_MS) != 0
 #error "SAMPLE_INTERVAL_MS must be a whole number of TIMEBASE_TICK_MS ticks"
+#endif
+
+// The bandgap only drifts thermally, over seconds, so re-reading it every
+// sample is waste: it costs two mux settles (4 ms) that a VBAT-only read
+// avoids entirely. Every 25th sample = every 500 ms.
+#define BANDGAP_EVERY_N_SAMPLES  25u
+
+// One 57-character line takes 59 ms to transmit at 9600 baud -- longer than
+// the 20 ms sample interval. Sampling and printing therefore have to be
+// decoupled. Every 25th sample = every 500 ms = about 12% serial duty.
+#define PRINT_EVERY_N_SAMPLES    25u
+
+// ---- PWM output (Timer1, OC1A, Arduino pin 9) ------------------------------
+//
+// Fast PWM mode 14 with ICR1 as TOP. Prescaler 1, so:
+//   frequency = 16 MHz / (PWM_TOP + 1),  resolution = PWM_TOP + 1 steps
+//
+// 15999 gives exactly 1000 Hz and 16000 steps, which makes the 1% floor
+// exactly 160 counts -- an exact 1.0000%, not a rounded approximation.
+//
+// CONFIRM AGAINST THE DRIVER'S DATASHEET: 1 kHz is a safe general choice for
+// LED dimming, but the payload PCB may want a specific range. Changing it is a
+// one-line edit; any PWM_TOP from 244 Hz (65535) upward works at prescaler 1.
+#define PWM_TOP                 15999u
+
+// Duty commanded during healthy operation.
+// CONFIRM: 100% assumed. Set to whatever the study actually calls for.
+#define PWM_DUTY_NORMAL_PCT     100u
+
+// The floor the latch drops to. 1% per the hand-drawn flowchart -- deliberately
+// not 0%, so the driver is left in a defined dimmed state rather than dark.
+#define PWM_DUTY_FLOOR_PCT      1u
+
+// ---- Detection ------------------------------------------------------------
+//
+// CONFIRM BEFORE FLIGHT: 21.0 V is 3.50 V/cell on a 6S pack -- conservative,
+// well above the 3.0 V/cell floor, and leaves capacity for RTH. This is the
+// single most safety-relevant number in the firmware and it is Robby's call.
+//
+// Resolution context: one ADC count is 28.4 mV at the pack, so the threshold
+// lands between counts 754 and 755. Hysteresis is irrelevant -- the latch is
+// one-way and never re-crosses.
+#define VBAT_THRESHOLD_MV       21000u
+
+// The 7-of-10 vote from the flowchart. Samples are paced at
+// SAMPLE_INTERVAL_MS, so the vote spans 10 x 20 ms = 200 ms -- long enough to
+// ride out any LED load transient, short enough to react promptly to a pack
+// that is genuinely finished.
+#define VOTE_SAMPLES            10u
+#define VOTE_TRIP_COUNT         7u
+
+#if (VOTE_TRIP_COUNT > VOTE_SAMPLES)
+#error "VOTE_TRIP_COUNT cannot exceed VOTE_SAMPLES -- the latch could never trip"
 #endif
 
 #endif
