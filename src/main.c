@@ -14,6 +14,7 @@
 #include "vbat.h"
 #include "timebase.h"
 #include "pwm.h"
+#include "latch.h"
 
 // bg_sum is printed as a uint16_t to avoid depending on whether the linked
 // avr-libc printf supports %lu. 1023 * 64 = 65472 still fits; 65 samples do not.
@@ -52,6 +53,69 @@ static const char *state_name(state_t s)
     case STATE_LATCHED: return "LATCHED";
     default:            return "?";
   }
+}
+
+// ---- Reset cause capture ---------------------------------------------------
+//
+// MCUSR records why the last reset happened. Its flags accumulate until
+// something clears them, and whoever reads it FIRST is the only one who sees
+// the truth. Stage 4 wants to boot straight into the latched state after any
+// reset that was not a genuine power-on -- which only works if MCUSR still
+// holds anything by the time our code runs.
+//
+// The fuse read says this board has BOOTSZ = 11, a 512-byte boot section, so
+// it is running Optiboot. Classic Optiboot reads and clears MCUSR itself in
+// order to implement its watchdog-jump-to-application trick, and some versions
+// stash the original in r2 before doing so. This code exists to find out which
+// is true here, because Stage 4's design depends on the answer.
+//
+// .noinit keeps these two bytes out of the .data/.bss initialisation that the
+// C runtime performs in .init4, so a value written in .init3 survives into
+// main() instead of being zeroed underneath us.
+uint8_t mcusr_mirror __attribute__((section(".noinit")));
+uint8_t r2_mirror    __attribute__((section(".noinit")));
+
+// .init3 runs after .init2 has set up the stack and before .init4 copies .data
+// and clears .bss -- the earliest point our own C can run, and well before
+// Arduino's init() or setup().
+//
+// naked: no prologue, no epilogue, no return. Execution simply falls through
+// into the next .init section, which is exactly what the linker expects here.
+// Returning from it, or letting the compiler emit a frame, would break the
+// boot sequence.
+void capture_reset_cause(void) __attribute__((naked, used, section(".init3")));
+void capture_reset_cause(void)
+{
+  uint8_t r2_copy;
+
+  // Grab r2 before the compiler has any chance to use it as a scratch
+  // register. If MCUSR itself comes back empty, whatever Optiboot left here is
+  // our only remaining evidence.
+  __asm__ __volatile__ ("mov %0, r2" : "=r" (r2_copy));
+
+  mcusr_mirror = MCUSR;
+  r2_mirror    = r2_copy;
+
+  // Clear it so the flags do not accumulate across future resets. From here on
+  // mcusr_mirror is the single source of truth for why we booted.
+  MCUSR = 0;
+}
+
+static void report_reset_cause(void)
+{
+  printf("MCUSR at boot: 0x%02X ", mcusr_mirror);
+
+  if (mcusr_mirror == 0u) {
+    printf("(empty - something cleared it before us)");
+  } else {
+    if (mcusr_mirror & (1u << PORF))  { printf(" PORF/power-on"); }
+    if (mcusr_mirror & (1u << EXTRF)) { printf(" EXTRF/external"); }
+    if (mcusr_mirror & (1u << BORF))  { printf(" BORF/brown-out"); }
+    if (mcusr_mirror & (1u << WDRF))  { printf(" WDRF/watchdog"); }
+  }
+  printf("\n");
+
+  printf("r2 at boot:    0x%02X (optiboot stash, if it makes one)\n", r2_mirror);
 }
 
 // ---- Boot diagnostics ------------------------------------------------------
@@ -122,7 +186,13 @@ void setup(void)
   // adc_init() also discards the slow first conversion after ADEN.
   adc_init();
 
-  printf("\nTTNT stage 3 - threshold detection and PWM floor\n");
+  // Decide, before anything else, whether this boot inherited a latch.
+  latch_init();
+
+  printf("\nTTNT stage 4 - latched low-voltage cutoff\n");
+  printf("boot: %s\n", latch_was_power_on() ? "POWER-ON (latch cleared)"
+                                            : "reset, RAM preserved");
+  report_reset_cause();
   report_fuses();
   printf("threshold %u mV, vote %u of %u over %u ms\n",
          VBAT_THRESHOLD_MV, VOTE_TRIP_COUNT, VOTE_SAMPLES,
@@ -133,7 +203,6 @@ void setup(void)
          (uint16_t)(F_CPU / (PWM_TOP + 1UL)), (uint16_t)(PWM_TOP + 1u),
          PWM_DUTY_NORMAL_PCT, PWM_DUTY_FLOOR_PCT);
   printf("sampling every %u ms\n\n", SAMPLE_INTERVAL_MS);
-  printf(" raw   bg_sum   avcc_mv   vbat_mv   duty   state\n");
 
   // Seed AVCC before the state machine needs it -- sample 0 must not divide by
   // a zero that has never been measured.
@@ -141,12 +210,24 @@ void setup(void)
   bg_sum_last = (uint16_t)bg_sum;
   avcc_mv     = adc_avcc_mv_from_bandgap_sum(bg_sum, ADC_AVG_SAMPLES);
 
-  state              = STATE_NORMAL;
   low_flag           = 0;
   votes_taken        = 0;
   votes_low          = 0;
   have_first_reading = 0;
   sample_counter     = 0;
+
+  if (latch_is_set()) {
+    // We were latched before this reset and power was never removed. Go
+    // straight back to the floor -- do not sample, do not evaluate, do not
+    // spend even one cycle at running duty.
+    pwm_force_pct(PWM_DUTY_FLOOR_PCT);
+    state = STATE_LATCHED;
+    printf("** BOOTED LATCHED - pwm held at %u%%. Power cycle to clear. **\n\n",
+           PWM_DUTY_FLOOR_PCT);
+  } else {
+    state = STATE_NORMAL;
+    printf(" raw   bg_sum   avcc_mv   vbat_mv   duty   state\n");
+  }
 
   // Started last, after the serial header has drained, so the first interval
   // is a full one.
@@ -160,6 +241,22 @@ void loop(void)
   }
 
   sample_counter++;
+
+  // The requirement is explicit: once latched, the circuit must not resume
+  // measuring. So this returns BEFORE the ADC is touched. Nothing downstream
+  // of here runs, which means no reading exists that could influence the PWM,
+  // however far the pack recovers. The latch is one-way by control flow, not
+  // just by the absence of a transition out of STATE_LATCHED.
+  if (state == STATE_LATCHED) {
+    latch_service_indicator();
+
+    // Bench heartbeat only; the flight build has no serial at all.
+    if ((sample_counter % LATCHED_HEARTBEAT_SAMPLES) == 0u) {
+      printf("LATCHED - pwm %u%%, not sampling. Power cycle to clear.\n",
+             pwm_get_duty_pct());
+    }
+    return;
+  }
 
   uint8_t  refresh = (sample_counter % BANDGAP_EVERY_N_SAMPLES) == 0u;
   uint16_t counts;
@@ -208,6 +305,9 @@ void loop(void)
           // bookkeeping, so a failed register write cannot be mistaken for a
           // successful latch.
           if (low_flag && pwm_is_at_floor()) {
+            // Record it in .noinit BEFORE entering the state, so a reset in
+            // the next microsecond still comes back latched.
+            latch_arm();
             state = STATE_LATCHED;
           } else {
             // Should be unreachable. If the hardware did not take the floor
@@ -225,9 +325,9 @@ void loop(void)
       break;
 
     case STATE_LATCHED:
-      // "Wait for reset." One-way by construction: nothing in this case can
-      // move the duty or the state, however far the pack recovers.
-      // Stage 4 hardens this against resets that are not power cycles.
+      // Unreachable: loop() returns before the switch once latched. Kept so
+      // the enum is handled exhaustively and any future edit that removes the
+      // early return still lands somewhere harmless.
       break;
 
     default:

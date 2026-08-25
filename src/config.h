@@ -182,4 +182,23 @@
 #error "VOTE_TRIP_COUNT cannot exceed VOTE_SAMPLES -- the latch could never trip"
 #endif
 
+// ---- Latch indicator (pin 13 / PB5, the Uno's onboard LED) -----------------
+//
+// The flight build has no serial output, so this is the only way to tell, after
+// recovering the payload, whether the latch fired. PB5 is free: Timer1 drives
+// PB1 for the PWM and nothing else uses the SPI pins.
+#define LATCH_LED_DDR           DDRB
+#define LATCH_LED_PORT          PORTB
+#define LATCH_LED_PIN           PINB
+#define LATCH_LED_BIT           PB5
+
+// Toggle every N samples. 25 x 20 ms = 500 ms per half cycle, so a 1 Hz blink.
+// Blinking rather than sitting solid is deliberate: a blink proves the firmware
+// is still running AND latched, where a steady pin could equally mean it hung.
+#define LATCH_LED_BLINK_SAMPLES 25u
+
+// How often the latched state prints a heartbeat, in samples. 100 x 20 ms = 2 s.
+// Bench diagnostics only -- the flight build has no serial output at all.
+#define LATCHED_HEARTBEAT_SAMPLES  100u
+
 #endif
