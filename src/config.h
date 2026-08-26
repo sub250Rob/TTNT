@@ -4,6 +4,18 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// ---- Build variant ---------------------------------------------------------
+//
+// 1 = bench build: serial diagnostics on.
+// 0 = FLIGHT build: every printf compiles away, and so do the format strings
+//     that would otherwise sit in RAM. There is no serial monitor on the
+//     drone, so the latch LED on pin 13 is the only status output.
+//
+// Behaviour is otherwise identical -- sampling, the vote, the PWM floor and
+// the latch are all outside the flag, so the flight build runs exactly the
+// code the bench build was tested with.
+#define TTNT_VERBOSE            1
+
 // ---- ADC channels ---------------------------------------------------------
 
 // VBAT sense: A0 = ADC0 = PC0, fed by the 47k/10k divider.
@@ -159,6 +171,53 @@
 #if (PWM_RAMP_STEP_PCT == 0)
 #error "PWM_RAMP_STEP_PCT of 0 would never reach the running duty"
 #endif
+
+// ---- Harness IR-drop compensation -----------------------------------------
+//
+// The divider measures at the payload's power input, which sits below the pack
+// terminals by whatever the harness drops. Measured on the bench rig:
+// 0.82 V at 1.5 A and 0.90 V at 1.4 A, i.e. ~546 milliohms.
+//
+// The correction is I * R, NOT a fixed offset and NOT a scale factor. That
+// matters because the driver is roughly a constant-power load: as the pack
+// sags it draws MORE current, so the drop grows exactly where the threshold
+// decision is made. A flat offset tuned at 24 V is 120 mV out at 21 V; this
+// model is under 40 mV.
+//
+// SET TO 0 TO DISABLE. Once the harness is fixed the correction should be
+// removed rather than left in -- 25 milliohms of good wiring puts the error at
+// 43 mV, inside a single ADC count, and an uncompensated reading is one fewer
+// thing that can be wrong.
+//
+// RECALIBRATE ALL THREE whenever the harness or the driver changes. These are
+// properties of this specific rig, not of the firmware.
+#define HARNESS_MILLIOHMS       546u
+
+// Hard ceiling on the correction, in millivolts.
+//
+// The correction only ever RAISES the reading, so an over-large value makes the
+// firmware think the pack is healthier than it is and latch late -- the unsafe
+// direction. This bounds the damage from a stale or mistyped constant.
+//
+// Set it to roughly twice the expected drop at full load. Bench rig with
+// alligator clips needs ~1000 mV; a real XT60 harness needs ~100 mV.
+#define HARNESS_COMP_MAX_MV     1200u
+
+// A flight build must never ship with a bench-sized harness constant. A real
+// XT60 + 18 AWG harness measures around 24 milliohms; anything above 100 means
+// the value was never recalibrated after leaving the bench.
+//
+// Measure it as: (DMM at pack terminals - firmware's `divider` column) under
+// full load, then HARNESS_MILLIOHMS = drop_mV * 1000 / load_mA.
+#if (TTNT_VERBOSE == 0) && (HARNESS_MILLIOHMS > 100u)
+#error "Flight build still carries a bench-sized HARNESS_MILLIOHMS. Recalibrate for the real harness, or set it to 0."
+#endif
+
+// Driver input power at 100% duty, and its fixed quiescent draw. Derived from
+// two measured points: 1500 mA at full duty and 80 mA at the 1% floor. The
+// model reproduces both to within about 10 mA.
+#define LOAD_POWER_MW_AT_FULL   33000u
+#define LOAD_QUIESCENT_MA       66u
 
 // ---- Detection ------------------------------------------------------------
 //
