@@ -82,7 +82,8 @@
 // The bandgap is a fixed 1.1 V reference and must not move with Vin at all.
 //
 // The bandgap has the highest source impedance of any channel and needs the
-// longest settle. Raised generously: at a 500 ms cadence the cost is nothing.
+// longest settle. Deliberately generous: it is only paid when the multiplexer
+// actually changes channel, which is once every BANDGAP_EVERY_N_SAMPLES.
 #define ADC_MUX_SETTLE_US     2000u
 
 // Conversions thrown away after a channel change, before the reading counts.
@@ -92,11 +93,12 @@
 
 // ---- Timing ---------------------------------------------------------------
 //
-// Replaces the stage 1 delay() in loop(). Two stages of division get us from a
-// 16 MHz crystal to a 500 ms cadence, because Timer2 cannot span that alone:
-// even at its slowest prescaler and a full 8-bit count it tops out at 16.4 ms.
+// Replaces the delay() that drove the cadence originally. Two stages of
+// division get from the crystal to the sample interval, because Timer2 cannot
+// span it alone: even at its slowest prescaler and a full 8-bit count it tops
+// out at 16.4 ms.
 //
-//   16 MHz --/128--> 125 kHz --OCR2A=249--> 2 ms ISR --count 250--> 500 ms
+//   16 MHz --/128--> 125 kHz --OCR2A=249--> 2 ms ISR --count 10--> 20 ms
 
 // How often the Timer2 ISR fires. timebase.c derives OCR2A from this.
 //
@@ -113,7 +115,7 @@
 // (8%), and the one sample in 25 that also reads the bandgap is 8.16 ms (41%).
 #define SAMPLE_INTERVAL_MS      20u
 
-// Ticks the ISR counts before raising the sample flag. 500 / 2 = 250.
+// Ticks the ISR counts before raising the sample flag. 20 / 2 = 10.
 #define SAMPLE_INTERVAL_TICKS   (SAMPLE_INTERVAL_MS / TIMEBASE_TICK_MS)
 
 // Integer division would silently truncate and leave the real period short.
