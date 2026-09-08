@@ -1,11 +1,8 @@
 // src/main.c
-// TTNT: sample VBAT on a Timer2 cadence, run the 7-of-10 vote from the
-// flowchart, drop the Timer1 PWM on pin 9 to its floor when the pack is spent,
-// and latch there until power is removed. Orchestration only -- ADC in adc.c,
-// timing in timebase.c, PWM in pwm.c, the latch in latch.c, maths in vbat.c,
-// every tunable in config.h.
-//
-// Set TTNT_VERBOSE to 0 in config.h for the flight build.
+// TTNT stage 3: sample VBAT on a Timer2 cadence, run the 7-of-10 vote from the
+// flowchart, and drop the Timer1 PWM on pin 9 to its floor when the pack is
+// spent. Orchestration only -- ADC in adc.c, timing in timebase.c, PWM in
+// pwm.c, maths in vbat.c, every tunable in config.h.
 #include <Arduino.h>
 #include <stdio.h>
 #include <avr/boot.h>
@@ -23,15 +20,6 @@
 // avr-libc printf supports %lu. 1023 * 64 = 65472 still fits; 65 samples do not.
 #if (ADC_AVG_SAMPLES > 64)
 #error "ADC_AVG_SAMPLES > 64 overflows the uint16_t bandgap sum printed below"
-#endif
-
-// Every diagnostic goes through this. With TTNT_VERBOSE at 0 the calls vanish
-// and so do their format strings, which on AVR are copied into RAM at startup
-// -- so the flight build reclaims that RAM rather than merely staying quiet.
-#if TTNT_VERBOSE
-#define LOG(...)  printf(__VA_ARGS__)
-#else
-#define LOG(...)  ((void)0)
 #endif
 
 // ---- Detection state -------------------------------------------------------
@@ -57,7 +45,6 @@ static uint16_t  bg_sum_last;
 
 static uint16_t  sample_counter;
 
-#if TTNT_VERBOSE
 static const char *state_name(state_t s)
 {
   switch (s) {
@@ -67,7 +54,6 @@ static const char *state_name(state_t s)
     default:            return "?";
   }
 }
-#endif
 
 // ---- Reset cause capture ---------------------------------------------------
 //
@@ -115,24 +101,22 @@ void capture_reset_cause(void)
   MCUSR = 0;
 }
 
-#if TTNT_VERBOSE
 static void report_reset_cause(void)
 {
-  LOG("MCUSR at boot: 0x%02X ", mcusr_mirror);
+  printf("MCUSR at boot: 0x%02X ", mcusr_mirror);
 
   if (mcusr_mirror == 0u) {
-    LOG("(empty - something cleared it before us)");
+    printf("(empty - something cleared it before us)");
   } else {
-    if (mcusr_mirror & (1u << PORF))  { LOG(" PORF/power-on"); }
-    if (mcusr_mirror & (1u << EXTRF)) { LOG(" EXTRF/external"); }
-    if (mcusr_mirror & (1u << BORF))  { LOG(" BORF/brown-out"); }
-    if (mcusr_mirror & (1u << WDRF))  { LOG(" WDRF/watchdog"); }
+    if (mcusr_mirror & (1u << PORF))  { printf(" PORF/power-on"); }
+    if (mcusr_mirror & (1u << EXTRF)) { printf(" EXTRF/external"); }
+    if (mcusr_mirror & (1u << BORF))  { printf(" BORF/brown-out"); }
+    if (mcusr_mirror & (1u << WDRF))  { printf(" WDRF/watchdog"); }
   }
-  LOG("\n");
+  printf("\n");
 
-  LOG("r2 at boot:    0x%02X (optiboot stash, if it makes one)\n", r2_mirror);
+  printf("r2 at boot:    0x%02X (optiboot stash, if it makes one)\n", r2_mirror);
 }
-#endif
 
 // ---- Boot diagnostics ------------------------------------------------------
 //
@@ -141,7 +125,6 @@ static void report_reset_cause(void)
 // latch. Read only: we never write fuses.
 //
 // Stage 4 adds the MCUSR reset-cause report alongside this.
-#if TTNT_VERBOSE
 static void report_fuses(void)
 {
   uint8_t low, high, ext;
@@ -156,30 +139,26 @@ static void report_fuses(void)
     ext  = boot_lock_fuse_bits_get(GET_EXTENDED_FUSE_BITS);
   }
 
-  LOG("fuses: low=0x%02X high=0x%02X ext=0x%02X\n", low, high, ext);
+  printf("fuses: low=0x%02X high=0x%02X ext=0x%02X\n", low, high, ext);
 
   // BODLEVEL is the low three bits of the extended fuse. Unprogrammed bits read
   // as 1, so "all ones" means the brown-out detector is switched off entirely.
-  LOG("brown-out reset at: ");
+  printf("brown-out reset at: ");
   switch (ext & 0x07u) {
-    case 0x07u: LOG("DISABLED\n");  break;
-    case 0x06u: LOG("1.8 V\n");     break;
-    case 0x05u: LOG("2.7 V\n");     break;
-    case 0x04u: LOG("4.3 V\n");     break;
-    default:    LOG("reserved\n");  break;
+    case 0x07u: printf("DISABLED\n");  break;
+    case 0x06u: printf("1.8 V\n");     break;
+    case 0x05u: printf("2.7 V\n");     break;
+    case 0x04u: printf("4.3 V\n");     break;
+    default:    printf("reserved\n");  break;
   }
 }
-#endif
 
 // ---- Sampling --------------------------------------------------------------
 
 // One VBAT reading in millivolts at the pack. Re-reads the bandgap only
 // occasionally: it drifts thermally, over seconds, and each visit costs two
 // mux settles that a VBAT-only read avoids.
-// Returns the harness-compensated pack voltage, and hands back the raw
-// at-the-divider reading too so the two can be compared on the terminal.
-static uint16_t sample_vbat_mv(uint16_t *counts_out, uint16_t *at_divider_out,
-                               uint8_t refresh_bandgap)
+static uint16_t sample_vbat_mv(uint16_t *counts_out, uint8_t refresh_bandgap)
 {
   if (refresh_bandgap) {
     uint32_t bg_sum = adc_read_bandgap_sum();
@@ -191,22 +170,14 @@ static uint16_t sample_vbat_mv(uint16_t *counts_out, uint16_t *at_divider_out,
   uint16_t adc_mv = vbat_counts_to_adc_mv(counts, avcc_mv);
 
   *counts_out = counts;
-  *at_divider_out = vbat_adc_mv_to_pack_mv(adc_mv);
-
-  // Add back what the harness drops, so the threshold judges the pack rather
-  // than the wiring. The current estimate needs the duty the driver is
-  // actually running at, which is why this cannot live inside vbat.c's pure
-  // divider maths.
-  return vbat_compensate_harness(*at_divider_out, pwm_get_duty_pct());
+  return vbat_adc_mv_to_pack_mv(adc_mv);
 }
 
 // ---- Setup / loop ----------------------------------------------------------
 
 void setup(void)
 {
-#if TTNT_VERBOSE
   serial_begin(9600);
-#endif
 
   // Pin 9 goes to 0% here, not to the running duty. If the pack is already flat
   // at power-up, the driver must never see full duty -- not even briefly.
@@ -218,22 +189,20 @@ void setup(void)
   // Decide, before anything else, whether this boot inherited a latch.
   latch_init();
 
-  LOG("\nTTNT stage 4 - latched low-voltage cutoff\n");
-  LOG("boot: %s\n", latch_was_power_on() ? "POWER-ON (latch cleared)"
+  printf("\nTTNT stage 4 - latched low-voltage cutoff\n");
+  printf("boot: %s\n", latch_was_power_on() ? "POWER-ON (latch cleared)"
                                             : "reset, RAM preserved");
-#if TTNT_VERBOSE
   report_reset_cause();
   report_fuses();
-#endif
-  LOG("threshold %u mV, vote %u of %u over %u ms\n",
+  printf("threshold %u mV, vote %u of %u over %u ms\n",
          VBAT_THRESHOLD_MV, VOTE_TRIP_COUNT, VOTE_SAMPLES,
          VOTE_SAMPLES * SAMPLE_INTERVAL_MS);
   // %u not %lu: this firmware never relies on the linked avr-libc printf
   // supporting longs. 16 MHz / 16000 = 1000 Hz fits a uint16_t comfortably.
-  LOG("pwm pin 9: %u Hz, %u steps, normal %u%%, floor %u%%\n",
+  printf("pwm pin 9: %u Hz, %u steps, normal %u%%, floor %u%%\n",
          (uint16_t)(F_CPU / (PWM_TOP + 1UL)), (uint16_t)(PWM_TOP + 1u),
          PWM_DUTY_NORMAL_PCT, PWM_DUTY_FLOOR_PCT);
-  LOG("sampling every %u ms\n\n", SAMPLE_INTERVAL_MS);
+  printf("sampling every %u ms\n\n", SAMPLE_INTERVAL_MS);
 
   // Seed AVCC before the state machine needs it -- sample 0 must not divide by
   // a zero that has never been measured.
@@ -253,11 +222,11 @@ void setup(void)
     // spend even one cycle at running duty.
     pwm_force_pct(PWM_DUTY_FLOOR_PCT);
     state = STATE_LATCHED;
-    LOG("** BOOTED LATCHED - pwm held at %u%%. Power cycle to clear. **\n\n",
+    printf("** BOOTED LATCHED - pwm held at %u%%. Power cycle to clear. **\n\n",
            PWM_DUTY_FLOOR_PCT);
   } else {
     state = STATE_NORMAL;
-    LOG(" raw   bg_sum   avcc_mv   divider   vbat_mv   duty   state\n");
+    printf(" raw   bg_sum   avcc_mv   vbat_mv   duty   state\n");
   }
 
   // Started last, after the serial header has drained, so the first interval
@@ -283,7 +252,7 @@ void loop(void)
 
     // Bench heartbeat only; the flight build has no serial at all.
     if ((sample_counter % LATCHED_HEARTBEAT_SAMPLES) == 0u) {
-      LOG("LATCHED - pwm %u%%, not sampling. Power cycle to clear.\n",
+      printf("LATCHED - pwm %u%%, not sampling. Power cycle to clear.\n",
              pwm_get_duty_pct());
     }
     return;
@@ -291,8 +260,7 @@ void loop(void)
 
   uint8_t  refresh = (sample_counter % BANDGAP_EVERY_N_SAMPLES) == 0u;
   uint16_t counts;
-  uint16_t at_divider_mv;
-  uint16_t vbat_mv = sample_vbat_mv(&counts, &at_divider_mv, refresh);
+  uint16_t vbat_mv = sample_vbat_mv(&counts, refresh);
 
   uint8_t  below   = (vbat_mv < VBAT_THRESHOLD_MV) ? 1u : 0u;
   state_t  entered = state;
@@ -311,7 +279,7 @@ void loop(void)
         // output there over PWM_RAMP_MS rather than stepping in one go. Covers
         // the first reading after boot, where pwm_init() left the pin at 0%.
         if (!have_first_reading) {
-          LOG("  -> healthy, ramping to %u%% over %u ms\n",
+          printf("  -> healthy, ramping to %u%% over %u ms\n",
                  PWM_DUTY_NORMAL_PCT, (uint16_t)PWM_RAMP_MS);
           have_first_reading = 1;
         }
@@ -344,7 +312,7 @@ void loop(void)
           } else {
             // Should be unreachable. If the hardware did not take the floor
             // value, say so loudly rather than pretending we are latched.
-            LOG("  ** PWM DID NOT REACH FLOOR - latch not armed **\n");
+            printf("  ** PWM DID NOT REACH FLOOR - latch not armed **\n");
             pwm_set_target_pct(PWM_DUTY_NORMAL_PCT);
             low_flag = 0;
             state = STATE_NORMAL;
@@ -379,7 +347,7 @@ void loop(void)
   uint8_t duty_now = pwm_get_duty_pct();
 
   if (duty_now != duty_before && duty_now == pwm_get_target_pct()) {
-    LOG("  -> ramp complete at %u%%\n", duty_now);
+    printf("  -> ramp complete at %u%%\n", duty_now);
   }
 
   // Print on every state change, and otherwise only occasionally -- one line
@@ -387,21 +355,21 @@ void loop(void)
   uint8_t changed = (state != entered);
 
   if (changed || (sample_counter % PRINT_EVERY_N_SAMPLES) == 0u) {
-    LOG("%4u  %6u  %8u  %8u  %8u  %4u%%   %s\n",
-           counts, bg_sum_last, avcc_mv, at_divider_mv, vbat_mv,
+    printf("%4u  %6u  %8u  %8u  %4u%%   %s\n",
+           counts, bg_sum_last, avcc_mv, vbat_mv,
            pwm_get_duty_pct(), state_name(state));
   }
 
   if (changed && state == STATE_VERIFY) {
-    LOG("  -> below %u mV, verifying\n", VBAT_THRESHOLD_MV);
+    printf("  -> below %u mV, verifying\n", VBAT_THRESHOLD_MV);
   }
   if (changed && state == STATE_LATCHED) {
-    LOG("  ** LATCHED: %u of %u samples low. PWM held at %u%%. **\n",
+    printf("  ** LATCHED: %u of %u samples low. PWM held at %u%%. **\n",
            votes_low, VOTE_SAMPLES, PWM_DUTY_FLOOR_PCT);
   }
 
   // Should stay quiet. If it fires, the work above is outrunning the interval.
   if (timebase_overrun()) {
-    LOG("  ** OVERRUN **\n");
+    printf("  ** OVERRUN **\n");
   }
 }
